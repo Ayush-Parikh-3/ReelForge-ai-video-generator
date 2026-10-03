@@ -1,0 +1,47 @@
+# Environment variables (NEVER COMMIT)
+.env
+.env*.local
+.env.production
+
+# Binaries & large tools
+cloudflared.exe
+cloudflared
+
+# Render / Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv
+venv/
+ENV/
+
+# Local generation outputs and temporary files
+temp/
+output/
+assets/cache/
+
+# IDE / Editor configs
+.vscode/
+.idea/
+*.swp
+*.swo

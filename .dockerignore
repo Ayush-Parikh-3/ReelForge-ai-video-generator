@@ -1,0 +1,14 @@
+.git
+.gitignore
+.env
+.env*
+cloudflared.exe
+cloudflared
+temp/
+output/
+__pycache__/
+*.pyc
+*.md
+run.bat
+run.ps1
+share.bat
