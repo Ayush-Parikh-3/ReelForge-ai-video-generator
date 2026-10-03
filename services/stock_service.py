@@ -73,11 +73,8 @@ def search_pixabay_video(query: str, pixabay_key: str, aspect_ratio: str, output
                         continue
 
                     videos = hit.get("videos", {})
-                    # Select best resolution matching orientation
-                    if aspect_ratio == "9:16":
-                        stream_info = videos.get("medium") or videos.get("large") or videos.get("small")
-                    else:
-                        stream_info = videos.get("large") or videos.get("medium") or videos.get("small")
+                    # Ultra-fast resolution selection: prefer medium/small (1-3MB) instead of 50MB 4K files
+                    stream_info = videos.get("medium") or videos.get("small") or videos.get("tiny") or videos.get("large")
 
                     if stream_info and stream_info.get("url"):
                         video_url = stream_info["url"]
@@ -120,7 +117,7 @@ def search_pixabay_photo(query: str, pixabay_key: str, width: int, height: int, 
                     if not is_safe_tags(tags):
                         continue
 
-                    img_url = hit.get("largeImageURL") or hit.get("fullHDURL") or hit.get("webformatURL")
+                    img_url = hit.get("webformatURL") or hit.get("largeImageURL")
                     if img_url:
                         dl = requests.get(img_url, headers=HEADERS, timeout=8.0)
                         if dl.status_code == 200 and len(dl.content) > 5000:

@@ -6,17 +6,31 @@ from config import FFMPEG_PATH, DIMENSIONS, SUBTITLE_STYLES, TEMP_DIR
 logger = logging.getLogger(__name__)
 
 def generate_ambient_music(duration: float, output_path: str):
-    """Generates a pleasant, calming ambient background drone/synth bed."""
-    dur_str = f"{max(3.0, duration):.1f}"
-    # Soft warm ambient synth with subtle lowpass filter
+    """Generates an ambient background audio track instantly."""
+    bed_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "ambient_bed.mp3")
+    dur_str = f"{max(2.0, duration):.2f}"
+    
+    if os.path.exists(bed_path):
+        cmd = [
+            FFMPEG_PATH, "-y",
+            "-stream_loop", "-1",
+            "-i", bed_path,
+            "-t", dur_str,
+            "-c:a", "copy",
+            output_path
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+            return
+
+    # Fallback to synthetic drone if asset file missing
     filter_complex = (
         f"anoisesrc=d={dur_str}:c=pink:r=44100:a=0.012,lowpass=f=300[noise];"
         f"sine=f=110:d={dur_str}[n1];"
         f"sine=f=164.81:d={dur_str}[n2];"
-        f"sine=f=220:d={dur_str}[n3];"
-        f"[n1][n2][n3]amix=inputs=3:dropout_transition=2[syn];"
+        f"[n1][n2]amix=inputs=2:dropout_transition=2[syn];"
         f"[syn]volume=0.05[synv];"
-        f"[noise][synv]amix=inputs=2:dropout_transition=2,afade=t=in:ss=0:d=1.5,afade=t=out:st={duration-1.5:.1f}:d=1.5[out]"
+        f"[noise][synv]amix=inputs=2:dropout_transition=2,afade=t=in:ss=0:d=1.0,afade=t=out:st={duration-1.0:.1f}:d=1.0[out]"
     )
     cmd = [
         FFMPEG_PATH, "-y",
@@ -25,7 +39,7 @@ def generate_ambient_music(duration: float, output_path: str):
         "-t", dur_str,
         output_path
     ]
-    subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE, errors="ignore")
+    subprocess.run(cmd, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
 
 def build_subtitle_filter(srt_file: str, aspect_ratio: str, style_name: str = "modern") -> str:
     """Builds clean, non-neon FFmpeg subtitle style configuration."""
@@ -97,6 +111,8 @@ def render_scene_video(
             "-map", "1:a:0",
             "-c:v", "libx264",
             "-preset", "ultrafast",
+            "-tune", "fastdecode",
+            "-threads", "2",
             "-crf", "26",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
@@ -107,30 +123,23 @@ def render_scene_video(
             rel_out
         ]
     else:
-        # Photography: apply smooth, cinematic camera motion (Ken Burns effect)
-        motion_id = scene_idx % 3
-        if motion_id == 0:
-            # Slow subtle push-in (zoom 1.0 to 1.15)
-            motion = f"zoompan=z='min(zoom+0.0016,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={w}x{h}:fps=24"
-        elif motion_id == 1:
-            # Subtle pull-out (1.15 to 1.0)
-            motion = f"zoompan=z='if(lte(on,1),1.15,max(1.0,zoom-0.0016))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={w}x{h}:fps=24"
-        else:
-            # Subtle horizontal drift
-            motion = f"zoompan=z=1.10:x='min(on*1.2,iw-iw/zoom)':y='ih/2-(ih/zoom/2)':d=1:s={w}x{h}:fps=24"
-
-        vf = f"{motion},{sub_filter}"
+        # Clean photography / card display with subtitle overlay (ultra-fast 4s render)
+        scale_crop = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
+        vf = f"{scale_crop},{sub_filter}"
 
         cmd = [
             FFMPEG_PATH, "-y",
             "-loop", "1",
+            "-framerate", "2",
             "-i", rel_visual,
             "-i", rel_audio,
             "-vf", vf,
             "-c:v", "libx264",
             "-preset", "ultrafast",
+            "-tune", "stillimage",
+            "-threads", "2",
             "-crf", "26",
-            "-r", "24",
+            "-r", "15",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             "-ar", "44100",

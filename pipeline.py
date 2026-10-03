@@ -2,6 +2,7 @@ import os
 import time
 import uuid
 import logging
+import concurrent.futures
 from config import OUTPUT_DIR, TEMP_DIR
 from services.llm_service import generate_script
 from services.stock_service import get_scene_visual
@@ -17,7 +18,7 @@ class VideoGenerationPipeline:
     def run(
         self,
         prompt: str,
-        scene_count: int = 4,
+        scene_count: int = 3,
         aspect_ratio: str = "16:9",
         voice_id: str = "en-US-ChristopherNeural",
         subtitle_style: str = "modern",
@@ -27,8 +28,8 @@ class VideoGenerationPipeline:
         progress_callback=None
     ) -> dict:
         """
-        Executes the full end-to-end text-to-video workflow.
-        Returns metadata including video_url, script, duration, scene details.
+        Executes ultra-fast end-to-end text-to-video workflow:
+        Parallel audio generation, parallel stock footage download, and parallel clip rendering.
         """
         def report(stage: str, percent: int, message: str, data: dict = None):
             if progress_callback:
@@ -41,43 +42,36 @@ class VideoGenerationPipeline:
             logger.info(f"[{percent}%] {stage}: {message}")
 
         job_id = uuid.uuid4().hex[:10]
-        report("script", 10, "Crafting exact script with Google Gemini AI...")
+        report("script", 10, "Writing script with Google Gemini AI...")
 
         # Step 1: Generate Script
         script_data = generate_script(prompt, scene_count, gemini_api_key)
         scenes = script_data.get("scenes", [])
         title = script_data.get("title", "AI Video Project")
 
-        report("script", 25, f"Script generated: \"{title}\" with {len(scenes)} scenes.", {"script": script_data})
+        report("script", 25, f"Script ready: \"{title}\" ({len(scenes)} scenes).", {"script": script_data})
 
-        scene_clips = []
-        scenes_meta = []
-        total_duration = 0.0
+        # Step 2: Concurrently process all scenes in parallel
+        report("production", 30, f"Generating {len(scenes)} scenes in parallel...")
 
-        # Step 2: Process each scene
-        for idx, scene in enumerate(scenes):
+        def process_scene(scene_tuple):
+            idx, scene = scene_tuple
             scene_num = idx + 1
             narration = scene.get("narration", "")
             stock_query = scene.get("stock_query", "cinematic nature")
 
-            base_pct = 25 + int((idx / len(scenes)) * 50)
-            report("voice", base_pct, f"Synthesizing voiceover for Scene {scene_num}/{len(scenes)}...")
-
-            # Audio generation
+            # 1. Edge-TTS Audio synthesis
             audio_path = os.path.join(TEMP_DIR, f"{job_id}_scene_{scene_num}.mp3")
             duration, cleaned_text = generate_scene_audio(narration, voice_id, audio_path)
-            total_duration += duration
 
-            # Subtitles generation
+            # 2. Subtitles generation
             srt_path = os.path.join(TEMP_DIR, f"{job_id}_scene_{scene_num}.srt")
             sub_segments = generate_scene_srt(cleaned_text, duration, srt_path)
 
-            # Stock footage matching
-            report("footage", base_pct + 5, f"Matching safe stock footage for Scene {scene_num} (\"{stock_query}\")...")
-            visual_info = get_scene_visual(stock_query, scene_num, aspect_ratio, pixabay_api_key)
+            # 3. Fast Stock Footage Retrieval (unique file per scene)
+            visual_info = get_scene_visual(stock_query, f"{job_id}_{scene_num}", aspect_ratio, pixabay_api_key)
 
-            # Render scene clip
-            report("rendering", base_pct + 10, f"Composing Scene {scene_num} clip with subtitles...")
+            # 4. Render Scene Clip with FFmpeg (ultrafast)
             clip_path = os.path.join(TEMP_DIR, f"{job_id}_scene_{scene_num}_clip.mp4")
             rendered = render_scene_video(
                 visual_info=visual_info,
@@ -90,31 +84,56 @@ class VideoGenerationPipeline:
                 subtitle_style=subtitle_style
             )
 
-            if rendered and os.path.exists(clip_path):
-                scene_clips.append(clip_path)
-
-            scenes_meta.append({
-                "scene_id": scene_num,
+            return {
+                "idx": idx,
+                "scene_num": scene_num,
                 "narration": narration,
                 "stock_query": stock_query,
-                "visual_type": visual_info.get("type"),
-                "visual_source": visual_info.get("source"),
+                "visual_info": visual_info,
                 "duration": duration,
-                "subtitles": sub_segments
-            })
+                "subtitles": sub_segments,
+                "clip_path": clip_path if (rendered and os.path.exists(clip_path)) else None
+            }
+
+        scene_results = [None] * len(scenes)
+        max_workers = min(4, max(1, len(scenes)))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_idx = {
+                executor.submit(process_scene, (i, s)): i for i, s in enumerate(scenes)
+            }
+            completed_count = 0
+            for future in concurrent.futures.as_completed(future_to_idx):
+                res = future.result()
+                scene_results[res["idx"]] = res
+                completed_count += 1
+                pct = 30 + int((completed_count / len(scenes)) * 48)
+                report("rendering", pct, f"Rendered Scene {res['scene_num']}/{len(scenes)} ({completed_count}/{len(scenes)} ready)...")
+
+        scene_clips = [r["clip_path"] for r in scene_results if r and r.get("clip_path")]
+        scenes_meta = [{
+            "scene_id": r["scene_num"],
+            "narration": r["narration"],
+            "stock_query": r["stock_query"],
+            "visual_type": r["visual_info"].get("type"),
+            "visual_source": r["visual_info"].get("source"),
+            "duration": r["duration"],
+            "subtitles": r["subtitles"]
+        } for r in scene_results if r]
+        total_duration = sum(r["duration"] for r in scene_results if r)
 
         if not scene_clips:
             raise RuntimeError("Failed to render video clips for scenes.")
 
-        # Step 3: Background music (optional)
+        # Step 3: Fast Background music (instant slice from pre-cached asset)
         music_path = None
         if include_music:
-            report("audio", 80, "Composing subtle ambient background music...")
+            report("audio", 82, "Adding subtle ambient audio bed...")
             music_path = os.path.join(TEMP_DIR, f"{job_id}_ambient.mp3")
             generate_ambient_music(total_duration, music_path)
 
-        # Step 4: Concatenation and Final Assembly
-        report("assembly", 88, "Assembling complete master video...")
+        # Step 4: Stream Concat & Final Assembly
+        report("assembly", 90, "Assembling complete master video...")
         output_filename = f"video_{job_id}.mp4"
         final_video_path = os.path.join(OUTPUT_DIR, output_filename)
 
