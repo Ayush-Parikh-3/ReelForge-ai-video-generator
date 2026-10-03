@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: reelforge
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/config
+    envVars:
+      - key: PORT
+        value: 10000
