@@ -2,6 +2,8 @@ import os
 import json
 import asyncio
 import logging
+import uuid
+import time
 from queue import Queue, Empty
 from threading import Thread
 from typing import Optional
@@ -135,6 +137,108 @@ async def generate_video_sync(req: GenerateRequest):
     except Exception as e:
         logger.error(f"Generation error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+# In-memory job state tracker for resilient mobile generation
+JOBS = {}
+MAX_JOBS_STORED = 200
+JOB_TTL_SECONDS = 3600  # 1 hour
+
+def cleanup_old_jobs():
+    """Remove expired jobs to prevent memory growth."""
+    now = time.time()
+    for jid in list(JOBS.keys()):
+        if now - JOBS[jid].get("created_at", now) > JOB_TTL_SECONDS:
+            JOBS.pop(jid, None)
+    if len(JOBS) > MAX_JOBS_STORED:
+        sorted_jobs = sorted(JOBS.items(), key=lambda item: item[1].get("created_at", 0))
+        for jid, _ in sorted_jobs[: len(JOBS) - MAX_JOBS_STORED]:
+            JOBS.pop(jid, None)
+
+@app.post("/api/start-generation")
+async def start_generation(req: GenerateRequest):
+    """
+    Starts an asynchronous video generation job.
+    Returns a unique job_id immediately. Clients (especially mobile phones)
+    poll /api/job-status/{job_id}, completely eliminating SSE timeout
+    and cellular connection drop issues.
+    """
+    if not req.prompt.strip():
+        raise HTTPException(status_code=400, detail="Prompt text cannot be empty.")
+
+    cleanup_old_jobs()
+
+    job_id = str(uuid.uuid4())
+    effective_gemini_key = (req.gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+    effective_pixabay_key = (req.pixabay_api_key or os.getenv("PIXABAY_API_KEY", "")).strip()
+
+    JOBS[job_id] = {
+        "status": "running",
+        "stage": "starting",
+        "percent": 5,
+        "message": "Initializing ReelForge engine...",
+        "result": None,
+        "error": None,
+        "created_at": time.time()
+    }
+
+    def progress_callback(event_data):
+        if job_id in JOBS:
+            if "stage" in event_data:
+                JOBS[job_id]["stage"] = event_data["stage"]
+            if "percent" in event_data:
+                JOBS[job_id]["percent"] = event_data["percent"]
+            if "message" in event_data:
+                JOBS[job_id]["message"] = event_data["message"]
+
+    def worker():
+        try:
+            pipeline = VideoGenerationPipeline()
+            result = pipeline.run(
+                prompt=req.prompt,
+                scene_count=req.scene_count,
+                aspect_ratio=req.aspect_ratio,
+                voice_id=req.voice_id,
+                subtitle_style=req.subtitle_style,
+                include_music=req.include_music,
+                gemini_api_key=effective_gemini_key,
+                pixabay_api_key=effective_pixabay_key,
+                progress_callback=progress_callback
+            )
+            if job_id in JOBS:
+                JOBS[job_id]["status"] = "done"
+                JOBS[job_id]["stage"] = "done"
+                JOBS[job_id]["percent"] = 100
+                JOBS[job_id]["message"] = "Video created successfully!"
+                JOBS[job_id]["result"] = result
+        except Exception as e:
+            logger.error(f"Pipeline worker failure for job {job_id}: {e}", exc_info=True)
+            if job_id in JOBS:
+                JOBS[job_id]["status"] = "error"
+                JOBS[job_id]["stage"] = "error"
+                JOBS[job_id]["percent"] = 0
+                JOBS[job_id]["error"] = str(e)
+
+    Thread(target=worker, daemon=True).start()
+
+    return {"job_id": job_id}
+
+@app.get("/api/job-status/{job_id}")
+async def get_job_status(job_id: str):
+    """
+    Returns current status and progress of a video generation job.
+    """
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found or expired.")
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "stage": job["stage"],
+        "percent": job["percent"],
+        "message": job["message"],
+        "result": job["result"],
+        "error": job["error"]
+    }
 
 @app.get("/api/generate-stream")
 async def generate_video_stream(

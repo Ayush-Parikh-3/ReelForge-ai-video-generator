@@ -61,6 +61,10 @@ document.addEventListener("DOMContentLoaded", () => {
   const toast = document.getElementById("toast");
 
   let activeEventSource = null;
+  let activeJobId = null;
+  let jobPollInterval = null;
+  let pollErrorCount = 0;
+  const MAX_POLL_RETRIES = 15;
   let serverHasGemini = false;
   let serverHasPixabay = false;
 
@@ -328,54 +332,106 @@ document.addEventListener("DOMContentLoaded", () => {
     // Scroll to top smoothly
     window.scrollTo({ top: 0, behavior: "smooth" });
 
-    // Build URL for SSE streaming endpoint with browser-supplied keys
-    const params = new URLSearchParams({
-      prompt: prompt,
-      scene_count: sceneCount,
-      aspect_ratio: aspectRatio,
-      voice_id: voiceId,
-      subtitle_style: subtitleStyle,
-      include_music: includeMusic,
-      gemini_api_key: geminiKey,
-      pixabay_api_key: pixabayKey
-    });
-
+    // Clear any previous active polling or streams
+    if (jobPollInterval) {
+      clearInterval(jobPollInterval);
+      jobPollInterval = null;
+    }
     if (activeEventSource) {
       activeEventSource.close();
+      activeEventSource = null;
     }
+    activeJobId = null;
+    pollErrorCount = 0;
 
-    activeEventSource = new EventSource(`/api/generate-stream?${params.toString()}`);
+    // Start video generation job via robust REST endpoint
+    try {
+      const response = await fetch("/api/start-generation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: prompt,
+          scene_count: sceneCount,
+          aspect_ratio: aspectRatio,
+          voice_id: voiceId,
+          subtitle_style: subtitleStyle,
+          include_music: includeMusic,
+          gemini_api_key: geminiKey,
+          pixabay_api_key: pixabayKey
+        })
+      });
 
-    activeEventSource.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        if (data.stage === "error") {
-          activeEventSource.close();
-          handleGenerationError(data.error || "An error occurred during video creation.");
-          return;
-        }
-
-        if (data.stage === "done") {
-          activeEventSource.close();
-          handleGenerationSuccess(data.result);
-          return;
-        }
-
-        updateStage(data.stage, data.percent, data.message);
-      } catch (err) {
-        console.warn("SSE parse note:", err);
+      if (!response.ok) {
+        let errMessage = "Failed to start generation.";
+        try {
+          const errData = await response.json();
+          if (errData && errData.detail) errMessage = errData.detail;
+        } catch (_) {}
+        handleGenerationError(errMessage);
+        return;
       }
-    };
 
-    activeEventSource.onerror = (e) => {
-      console.error("SSE stream connection error", e);
-      activeEventSource.close();
-      // Attempt fallback polling if SSE connection dropped
-      handleGenerationError("Generation interrupted. Please check network connection.");
-    };
+      const data = await response.json();
+      activeJobId = data.job_id;
+
+      // Resilient background polling: immune to mobile SSE disconnects and proxy drops
+      jobPollInterval = setInterval(async () => {
+        if (!activeJobId) {
+          clearInterval(jobPollInterval);
+          return;
+        }
+
+        try {
+          const pollRes = await fetch(`/api/job-status/${activeJobId}`);
+          if (!pollRes.ok) {
+            if (pollRes.status === 404) {
+              clearInterval(jobPollInterval);
+              handleGenerationError("Generation session expired. Please try again.");
+              return;
+            }
+            throw new Error(`HTTP ${pollRes.status}`);
+          }
+
+          const job = await pollRes.json();
+          pollErrorCount = 0; // Reset network error count on successful poll
+
+          if (job.status === "error") {
+            clearInterval(jobPollInterval);
+            handleGenerationError(job.error || "An error occurred during video creation.");
+            return;
+          }
+
+          if (job.status === "done") {
+            clearInterval(jobPollInterval);
+            handleGenerationSuccess(job.result);
+            return;
+          }
+
+          // Update progress stepper and bar
+          updateStage(job.stage, job.percent, job.message);
+
+        } catch (pollErr) {
+          pollErrorCount++;
+          console.warn(`Temporary mobile network hiccup (${pollErrorCount}/${MAX_POLL_RETRIES}):`, pollErr);
+          if (pollErrorCount >= MAX_POLL_RETRIES) {
+            clearInterval(jobPollInterval);
+            handleGenerationError("Network connection lost. Please check your internet connection.");
+          }
+        }
+      }, 1000);
+
+    } catch (startErr) {
+      console.error("Start generation network error:", startErr);
+      handleGenerationError("Unable to reach server. Please check your internet connection.");
+    }
   }
 
   function handleGenerationSuccess(result) {
+    if (jobPollInterval) {
+      clearInterval(jobPollInterval);
+      jobPollInterval = null;
+    }
+    activeJobId = null;
     progressSection.classList.add("hidden");
     resultSection.classList.remove("hidden");
     btnGenerate.disabled = false;
@@ -436,6 +492,11 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function handleGenerationError(errMsg) {
+    if (jobPollInterval) {
+      clearInterval(jobPollInterval);
+      jobPollInterval = null;
+    }
+    activeJobId = null;
     progressSection.classList.add("hidden");
     promptSection.classList.remove("hidden");
     btnGenerate.disabled = false;
@@ -445,6 +506,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // 10. Reset for New Video
   btnNewVideo.addEventListener("click", () => {
+    if (jobPollInterval) {
+      clearInterval(jobPollInterval);
+      jobPollInterval = null;
+    }
+    activeJobId = null;
     videoPlayer.pause();
     resultSection.classList.add("hidden");
     promptSection.classList.remove("hidden");
